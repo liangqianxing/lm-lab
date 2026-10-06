@@ -1,0 +1,37 @@
+# Python environments and generated packaging
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local inputs and experiment artifacts
+/data/*
+!/data/README.md
+/runs/*
+!/runs/README.md
+.cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+
+# Credentials and machine-specific configuration
+.env
+.env.*
+*.pem
+*.key
+.secrets/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

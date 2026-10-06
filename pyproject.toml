@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lm-lab"
+version = "0.1.0"
+description = "A hands-on language model implementation learning lab"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lm_lab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+markers = [
+    "t1: UTF-8 byte tokenizer",
+    "t2: pair counting, non-overlapping merges, and minimal BPE training",
+    "t3: merge-rank BPE encoding and byte-based decoding",
+    "t4: lossless pretokenization and special-token boundaries",
+    "t5: serialization, determinism, and measurement readiness",
+]
