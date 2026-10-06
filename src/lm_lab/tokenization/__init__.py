@@ -1,15 +1,6 @@
-"""Public interfaces for the tokenizer exercises T1 through T5."""
+"""Byte-level BPE tokenizer with UTF-8 encoding."""
 
-from .bpe import BPEModel, BPETokenizer, Merge, count_pairs, merge_pair, pretokenize, train_bpe
 from .byte_tokenizer import ByteTokenizer
+from .bpe import BPEModel, Merge, train_bpe, encode, decode, save, load
 
-__all__ = [
-    "BPEModel",
-    "BPETokenizer",
-    "ByteTokenizer",
-    "Merge",
-    "count_pairs",
-    "merge_pair",
-    "pretokenize",
-    "train_bpe",
-]
+__all__ = ['ByteTokenizer', 'BPEModel', 'Merge', 'train_bpe', 'encode', 'decode', 'save', 'load']

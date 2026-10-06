@@ -1,12 +1,11 @@
 """
-Layer normalization implementation.
+Layer normalization implementation using pure NumPy.
 
 Normalizes inputs across the feature dimension for numerical stability
 and improved training dynamics.
 """
 
 import numpy as np
-from typing import Tuple
 
 
 class LayerNorm:
@@ -26,10 +25,11 @@ class LayerNorm:
         self.eps = eps
 
         # Learnable parameters
-        self.gamma = np.ones(d_model)
-        self.beta = np.zeros(d_model)
+        self.gamma = np.ones(d_model, dtype=np.float32)
+        self.beta = np.zeros(d_model, dtype=np.float32)
 
-        self.cache = {}
+        # Cache for backward pass
+        self.cache = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """
@@ -42,8 +42,8 @@ class LayerNorm:
             Normalized output of same shape
         """
         # Compute mean and variance along last dimension
-        mean = x.mean(axis=-1, keepdims=True)
-        var = x.var(axis=-1, keepdims=True)
+        mean = np.mean(x, axis=-1, keepdims=True)
+        var = np.var(x, axis=-1, keepdims=True)
 
         # Normalize
         x_normalized = (x - mean) / np.sqrt(var + self.eps)
@@ -51,13 +51,8 @@ class LayerNorm:
         # Apply affine transformation
         output = self.gamma * x_normalized + self.beta
 
-        # Cache for backward
-        self.cache = {
-            'x': x,
-            'mean': mean,
-            'var': var,
-            'x_normalized': x_normalized
-        }
+        # Cache for backward pass
+        self.cache = (x, mean, var, x_normalized)
 
         return output
 
@@ -66,47 +61,39 @@ class LayerNorm:
         Backward pass of layer normalization.
 
         Args:
-            grad_output: Gradient of loss w.r.t. output
+            grad_output: Gradient of loss w.r.t. output, shape (..., d_model)
 
         Returns:
-            Gradient w.r.t. input
+            Gradient of loss w.r.t. input, same shape as input
         """
-        x = self.cache['x']
-        mean = self.cache['mean']
-        var = self.cache['var']
-        x_normalized = self.cache['x_normalized']
+        if self.cache is None:
+            raise RuntimeError("backward() called before forward()")
 
-        # Gradient of affine parameters
-        self.grad_gamma = (grad_output * x_normalized).sum(axis=tuple(range(grad_output.ndim - 1)))
-        self.grad_beta = grad_output.sum(axis=tuple(range(grad_output.ndim - 1)))
+        x, mean, var, x_normalized = self.cache
+
+        # Gradient w.r.t. gamma and beta
+        self.grad_gamma = np.sum(grad_output * x_normalized, axis=tuple(range(grad_output.ndim - 1)))
+        self.grad_beta = np.sum(grad_output, axis=tuple(range(grad_output.ndim - 1)))
 
         # Gradient w.r.t. normalized input
         grad_x_normalized = grad_output * self.gamma
 
         # Gradient w.r.t. variance
-        std = np.sqrt(var + self.eps)
-        N = x.shape[-1]
+        std_inv = 1.0 / np.sqrt(var + self.eps)
+        grad_var = np.sum(grad_x_normalized * (x - mean) * (-0.5) * std_inv**3, axis=-1, keepdims=True)
 
-        # Gradient through normalization
-        grad_var = (grad_x_normalized * (x - mean) * -0.5 * (var + self.eps) ** (-1.5)).sum(
-            axis=-1, keepdims=True
+        # Gradient w.r.t. mean
+        grad_mean = (
+            np.sum(grad_x_normalized * (-std_inv), axis=-1, keepdims=True) +
+            grad_var * np.mean(-2.0 * (x - mean), axis=-1, keepdims=True)
         )
 
-        # Gradient through mean
-        grad_mean = (grad_x_normalized * -1.0 / std).sum(axis=-1, keepdims=True)
-        grad_mean += grad_var * (-2.0 / N) * (x - mean).sum(axis=-1, keepdims=True)
-
         # Gradient w.r.t. input
-        grad_x = grad_x_normalized / std
-        grad_x += grad_var * 2.0 * (x - mean) / N
-        grad_x += grad_mean / N
+        N = x.shape[-1]
+        grad_x = (
+            grad_x_normalized * std_inv +
+            grad_var * 2.0 * (x - mean) / N +
+            grad_mean / N
+        )
 
         return grad_x
-
-    def parameters(self):
-        """Return trainable parameters."""
-        return [self.gamma, self.beta]
-
-    def gradients(self):
-        """Return parameter gradients."""
-        return [self.grad_gamma, self.grad_beta]

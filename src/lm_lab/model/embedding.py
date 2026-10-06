@@ -1,12 +1,11 @@
 """
-Position encoding implementations for Transformer models.
+Position encoding implementations for Transformer models using NumPy.
 
 Provides both learned and sinusoidal positional encodings.
 """
 
 import math
 import numpy as np
-from typing import Optional
 
 
 class PositionalEncoding:
@@ -27,12 +26,13 @@ class PositionalEncoding:
 
         # Create positional encoding matrix
         pe = np.zeros((max_len, d_model))
-        position = np.arange(0, max_len).reshape(-1, 1)
-        div_term = np.exp(np.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        position = np.arange(0, max_len, dtype=np.float32).reshape(-1, 1)
+        div_term = np.exp(np.arange(0, d_model, 2, dtype=np.float32) * (-math.log(10000.0) / d_model))
 
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
 
+        # Store as instance attribute (not trainable)
         self.pe = pe
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -40,7 +40,7 @@ class PositionalEncoding:
         Add positional encoding to input.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model)
+            x: Input array of shape (batch_size, seq_len, d_model)
 
         Returns:
             Input with positional encoding added
@@ -50,23 +50,17 @@ class PositionalEncoding:
 
     def backward(self, grad_output: np.ndarray) -> np.ndarray:
         """
-        Backward pass (gradient flows through unchanged).
+        Backward pass for positional encoding.
+
+        Since positional encoding is just addition, gradient passes through unchanged.
 
         Args:
-            grad_output: Gradient from upstream
+            grad_output: Gradient from downstream, shape (batch_size, seq_len, d_model)
 
         Returns:
-            Gradient w.r.t. input
+            Gradient with respect to input
         """
         return grad_output
-
-    def parameters(self):
-        """No trainable parameters."""
-        return []
-
-    def gradients(self):
-        """No gradients."""
-        return []
 
 
 class LearnedPositionalEncoding:
@@ -84,55 +78,42 @@ class LearnedPositionalEncoding:
         self.d_model = d_model
         self.max_len = max_len
 
-        # Initialize learned position embeddings
-        scale = 1.0 / math.sqrt(d_model)
-        self.position_embeddings = np.random.randn(max_len, d_model) * scale
+        # Learnable position embeddings (initialized with small random values)
+        self.position_embeddings = np.random.randn(max_len, d_model).astype(np.float32) * 0.02
 
-        self.cache = {}
+        # Cache for backward pass
+        self.last_seq_len = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """
         Add learned positional encoding to input.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model)
+            x: Input array of shape (batch_size, seq_len, d_model)
 
         Returns:
             Input with positional encoding added
         """
-        batch_size, seq_len, d_model = x.shape
+        seq_len = x.shape[1]
+        self.last_seq_len = seq_len
+        return x + self.position_embeddings[:seq_len, :]
 
-        # Get position embeddings for this sequence
-        pos_emb = self.position_embeddings[:seq_len, :]
-
-        # Cache for backward
-        self.cache = {'seq_len': seq_len}
-
-        return x + pos_emb
-
-    def backward(self, grad_output: np.ndarray) -> np.ndarray:
+    def backward(self, grad_output: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
-        Backward pass.
+        Backward pass for learned positional encoding.
 
         Args:
-            grad_output: Gradient from upstream (batch_size, seq_len, d_model)
+            grad_output: Gradient from downstream, shape (batch_size, seq_len, d_model)
 
         Returns:
-            Gradient w.r.t. input
+            Tuple of (gradient w.r.t. input, gradient w.r.t. position_embeddings)
         """
-        seq_len = self.cache['seq_len']
+        # Gradient w.r.t. input passes through unchanged
+        grad_input = grad_output
 
         # Gradient w.r.t. position embeddings
-        self.grad_position_embeddings = np.zeros_like(self.position_embeddings)
-        self.grad_position_embeddings[:seq_len, :] = grad_output.sum(axis=0)
+        # Sum over batch dimension since position embeddings are shared
+        grad_position_embeddings = np.zeros_like(self.position_embeddings)
+        grad_position_embeddings[:self.last_seq_len, :] = np.sum(grad_output, axis=0)
 
-        # Gradient w.r.t. input (flows through unchanged)
-        return grad_output
-
-    def parameters(self):
-        """Return trainable parameters."""
-        return [self.position_embeddings]
-
-    def gradients(self):
-        """Return parameter gradients."""
-        return [self.grad_position_embeddings]
+        return grad_input, grad_position_embeddings

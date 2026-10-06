@@ -3,7 +3,8 @@ Text generation and sampling utilities.
 """
 
 import numpy as np
-from typing import Optional, Callable
+import torch
+from typing import Optional
 
 
 def sample(logits: np.ndarray, temperature: float = 1.0) -> int:
@@ -114,20 +115,6 @@ def sample_top_p(logits: np.ndarray, p: float, temperature: float = 1.0) -> int:
     return int(top_p_indices[sampled_idx])
 
 
-def sample_temperature(logits: np.ndarray, temperature: float) -> int:
-    """
-    Sample with temperature (alias for sample).
-
-    Args:
-        logits: Logits array of shape (vocab_size,)
-        temperature: Sampling temperature
-
-    Returns:
-        Sampled token ID
-    """
-    return sample(logits, temperature)
-
-
 def generate(
     model,
     prompt_ids: np.ndarray,
@@ -155,14 +142,15 @@ def generate(
     generated = list(prompt_ids)
 
     for _ in range(max_length - len(prompt_ids)):
-        # Prepare input (add batch dimension)
-        input_ids = np.array([generated])
+        # Prepare input (add batch dimension and convert to tensor)
+        input_ids = torch.from_numpy(np.array([generated])).long()
 
         # Forward pass
-        logits = model.forward(input_ids)
+        with torch.no_grad():
+            logits = model.forward(input_ids)
 
-        # Get logits for last position
-        next_token_logits = logits[0, -1, :]
+        # Get logits for last position (convert to numpy)
+        next_token_logits = logits[0, -1, :].cpu().numpy()
 
         # Sample next token
         if top_k is not None:

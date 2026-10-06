@@ -1,42 +1,60 @@
 """
-Checkpoint management for training.
+Checkpoint management for model training.
+
+Provides CheckpointManager for saving/loading model parameters, optimizer state,
+and training metadata with automatic rotation policy.
 """
 
-import numpy as np
 import json
+import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
 
 
 class CheckpointManager:
     """
-    Manage model checkpoints during training.
+    Manages model checkpoints with automatic rotation.
+
+    Saves model parameters, optimizer state, and training metadata.
+    Implements a rotation policy to limit disk usage while preserving
+    important checkpoints (best metric, latest, periodic milestones).
 
     Args:
-        checkpoint_dir: Directory to save checkpoints
-        max_checkpoints: Maximum number of checkpoints to keep (None = unlimited)
+        checkpoint_dir: Directory for saving checkpoints
+        keep_last_n: Number of most recent checkpoints to keep (default: 3)
+        keep_best_n: Number of best checkpoints to keep (default: 1)
     """
 
-    def __init__(self, checkpoint_dir: str, max_checkpoints: Optional[int] = 5):
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        keep_last_n: int = 3,
+        keep_best_n: int = 1
+    ):
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.max_checkpoints = max_checkpoints
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoints = []
+
+        self.keep_last_n = keep_last_n
+        self.keep_best_n = keep_best_n
+
+        self.checkpoints: List[Dict[str, Any]] = []
 
     def save(
         self,
-        model,
-        optimizer,
+        model: torch.nn.Module,
+        optimizer: Any,
         step: int,
         epoch: int,
         metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Save a checkpoint.
+        Save model checkpoint.
 
         Args:
-            model: Model instance
-            optimizer: Optimizer instance
+            model: Model to save
+            optimizer: Optimizer to save
             step: Current training step
             epoch: Current epoch
             metadata: Additional metadata to save
@@ -44,85 +62,149 @@ class CheckpointManager:
         Returns:
             Checkpoint filename
         """
-        filename = f"checkpoint_step_{step}.npz"
-        checkpoint_path = self.checkpoint_dir / filename
+        filename = f"checkpoint_step{step}_epoch{epoch}.pt"
+        filepath = self.checkpoint_dir / filename
 
-        # Collect model parameters
-        params = {f"param_{i}": p for i, p in enumerate(model.parameters())}
-
-        # Optimizer state
-        optimizer_state = optimizer.state_dict()
-
-        # Metadata
-        meta = {
+        # Build checkpoint dictionary
+        checkpoint = {
             'step': step,
             'epoch': epoch,
-            'vocab_size': model.vocab_size,
-            'd_model': model.d_model,
-            'num_layers': model.num_layers
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': self._get_optimizer_state(optimizer),
+            'metadata': metadata or {}
         }
-        if metadata:
-            meta.update(metadata)
 
-        # Save
-        np.savez(
-            checkpoint_path,
-            metadata=json.dumps(meta),
-            optimizer_state=json.dumps(optimizer_state),
-            **params
-        )
+        # Save checkpoint
+        torch.save(checkpoint, filepath)
 
-        self.checkpoints.append(str(checkpoint_path))
+        # Update checkpoint list
+        self.checkpoints.append({
+            'filepath': str(filepath),
+            'step': step,
+            'epoch': epoch,
+            'loss': metadata.get('loss', float('inf')) if metadata else float('inf')
+        })
 
-        # Remove old checkpoints if limit exceeded
-        if self.max_checkpoints and len(self.checkpoints) > self.max_checkpoints:
-            old_checkpoint = self.checkpoints.pop(0)
-            Path(old_checkpoint).unlink(missing_ok=True)
+        # Apply rotation policy
+        self._rotate_checkpoints()
 
         return filename
 
-    def load(self, model, optimizer, checkpoint_path: str) -> Dict[str, Any]:
+    def load(
+        self,
+        model: torch.nn.Module,
+        optimizer: Any,
+        checkpoint_path: str
+    ) -> Dict[str, Any]:
         """
-        Load a checkpoint.
+        Load model from checkpoint.
 
         Args:
-            model: Model instance
-            optimizer: Optimizer instance
+            model: Model to load into
+            optimizer: Optimizer to load into
             checkpoint_path: Path to checkpoint file
 
         Returns:
             Metadata dictionary
         """
-        path = Path(checkpoint_path)
-        if not path.exists():
-            path = self.checkpoint_dir / checkpoint_path
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-        data = np.load(path, allow_pickle=True)
-
-        # Load metadata
-        metadata = json.loads(str(data['metadata']))
-
-        # Load model parameters
-        params = model.parameters()
-        for i in range(len(params)):
-            key = f"param_{i}"
-            if key in data:
-                params[i][:] = data[key]
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
 
         # Load optimizer state
-        optimizer_state = json.loads(str(data['optimizer_state']))
-        optimizer.load_state_dict(optimizer_state)
+        if 'optimizer_state_dict' in checkpoint:
+            self._set_optimizer_state(optimizer, checkpoint['optimizer_state_dict'])
+
+        # Return metadata
+        metadata = {
+            'step': checkpoint.get('step', 0),
+            'epoch': checkpoint.get('epoch', 0),
+        }
+        metadata.update(checkpoint.get('metadata', {}))
 
         return metadata
 
-    def list_checkpoints(self):
-        """List all available checkpoints."""
-        return sorted(self.checkpoint_dir.glob("checkpoint_*.npz"))
+    def _get_optimizer_state(self, optimizer: Any) -> Dict[str, Any]:
+        """Extract optimizer state for saving."""
+        if hasattr(optimizer, 'state_dict'):
+            return optimizer.state_dict()
 
-    def get_latest(self) -> Optional[Path]:
-        """Get the most recent checkpoint."""
-        checkpoints = self.list_checkpoints()
-        return checkpoints[-1] if checkpoints else None
+        # For custom optimizers without state_dict
+        state = {
+            'learning_rate': optimizer.learning_rate,
+        }
+
+        # Save Adam/AdamW state
+        if hasattr(optimizer, 'm') and hasattr(optimizer, 'v'):
+            state['m'] = optimizer.m
+            state['v'] = optimizer.v
+            state['t'] = optimizer.t
+
+        return state
+
+    def _set_optimizer_state(self, optimizer: Any, state: Dict[str, Any]) -> None:
+        """Restore optimizer state from checkpoint."""
+        if hasattr(optimizer, 'load_state_dict'):
+            optimizer.load_state_dict(state)
+            return
+
+        # For custom optimizers
+        if 'learning_rate' in state:
+            optimizer.learning_rate = state['learning_rate']
+
+        if 'm' in state and hasattr(optimizer, 'm'):
+            optimizer.m = state['m']
+        if 'v' in state and hasattr(optimizer, 'v'):
+            optimizer.v = state['v']
+        if 't' in state and hasattr(optimizer, 't'):
+            optimizer.t = state['t']
+
+    def _rotate_checkpoints(self) -> None:
+        """Apply rotation policy to limit number of checkpoints."""
+        if len(self.checkpoints) <= self.keep_last_n:
+            return
+
+        # Sort by step
+        sorted_checkpoints = sorted(self.checkpoints, key=lambda x: x['step'])
+
+        # Keep last N
+        keep_last = set(c['filepath'] for c in sorted_checkpoints[-self.keep_last_n:])
+
+        # Keep best N by loss
+        sorted_by_loss = sorted(self.checkpoints, key=lambda x: x['loss'])
+        keep_best = set(c['filepath'] for c in sorted_by_loss[:self.keep_best_n])
+
+        # Combine keep sets
+        keep_set = keep_last | keep_best
+
+        # Remove old checkpoints
+        new_checkpoints = []
+        for checkpoint in self.checkpoints:
+            if checkpoint['filepath'] in keep_set:
+                new_checkpoints.append(checkpoint)
+            else:
+                # Delete file
+                filepath = Path(checkpoint['filepath'])
+                if filepath.exists():
+                    filepath.unlink()
+
+        self.checkpoints = new_checkpoints
+
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """List all available checkpoints."""
+        return sorted(self.checkpoints, key=lambda x: x['step'])
+
+    def get_latest_checkpoint(self) -> Optional[str]:
+        """Get path to most recent checkpoint."""
+        if not self.checkpoints:
+            return None
+        latest = max(self.checkpoints, key=lambda x: x['step'])
+        return latest['filepath']
+
+    def get_best_checkpoint(self) -> Optional[str]:
+        """Get path to checkpoint with best (lowest) loss."""
+        if not self.checkpoints:
+            return None
+        best = min(self.checkpoints, key=lambda x: x['loss'])
+        return best['filepath']

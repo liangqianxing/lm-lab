@@ -15,8 +15,12 @@ from .layer_norm import LayerNorm
 from .feedforward import FeedForward
 from .transformer import TransformerBlock, TransformerLM
 
+# Alias for compatibility
+MultiHeadAttention = CausalSelfAttention
+
 __all__ = [
     'CausalSelfAttention',
+    'MultiHeadAttention',
     'PositionalEncoding',
     'LearnedPositionalEncoding',
     'LayerNorm',

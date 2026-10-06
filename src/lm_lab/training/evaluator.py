@@ -3,6 +3,7 @@ Evaluation utilities for language models.
 """
 
 import numpy as np
+import torch
 from typing import Optional, Tuple
 from .dataloader import TextDataLoader
 
@@ -67,18 +68,23 @@ class Evaluator:
         Evaluate model on entire dataset.
 
         Returns:
-            Dictionary with metrics (loss, perplexity)
+            Dictionary with metrics (loss, perplexity, num_tokens)
         """
         total_loss = 0.0
         total_tokens = 0
 
         for batch in self.data_loader:
+            # Convert to tensors
+            input_ids = torch.from_numpy(batch.input_ids).long()
+            target_ids = torch.from_numpy(batch.target_ids).long()
+
             # Forward pass
-            logits = self.model.forward(batch.input_ids)
+            with torch.no_grad():
+                logits = self.model.forward(input_ids)
 
             # Compute loss
-            batch_loss = self._compute_loss(logits, batch.target_ids)
-            batch_size, seq_len = batch.target_ids.shape
+            batch_loss = self._compute_loss(logits, target_ids)
+            batch_size, seq_len = target_ids.shape
 
             total_loss += batch_loss * (batch_size * seq_len)
             total_tokens += batch_size * seq_len
@@ -87,12 +93,12 @@ class Evaluator:
         ppl = np.exp(avg_loss) if avg_loss < 100 else float('inf')
 
         return {
-            'loss': avg_loss,
-            'perplexity': ppl,
-            'num_tokens': total_tokens
+            'loss': float(avg_loss),
+            'perplexity': float(ppl),
+            'num_tokens': int(total_tokens)
         }
 
-    def _compute_loss(self, logits: np.ndarray, targets: np.ndarray) -> float:
+    def _compute_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> float:
         """
         Compute cross-entropy loss.
 
@@ -103,24 +109,12 @@ class Evaluator:
         Returns:
             Average loss per token
         """
-        batch_size, seq_len, vocab_size = logits.shape
+        # Reshape for cross entropy
+        logits_flat = logits.view(-1, logits.size(-1))
+        targets_flat = targets.view(-1)
 
-        # Numerical stability
-        logits_max = np.max(logits, axis=-1, keepdims=True)
-        logits_stable = logits - logits_max
-
-        # Softmax
-        exp_logits = np.exp(logits_stable)
-        probs = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
-
-        # Cross-entropy
-        loss = 0.0
-        for b in range(batch_size):
-            for s in range(seq_len):
-                target_id = targets[b, s]
-                loss -= np.log(probs[b, s, target_id] + 1e-10)
-
-        return loss / (batch_size * seq_len)
+        loss = torch.nn.functional.cross_entropy(logits_flat, targets_flat)
+        return loss.item()
 
 
 def perplexity(model, data_loader: TextDataLoader) -> float:
